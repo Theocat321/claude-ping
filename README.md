@@ -2,8 +2,6 @@
 
 A floating HUD for macOS that appears **next to your mouse cursor** when Claude Code finishes a task or needs input. Click it to jump straight back to the terminal.
 
-No more babysitting Claude Code windows. Switch to another app, and ClaudePing will find you when it's time.
-
 ## How it works
 
 ```
