@@ -103,6 +103,14 @@ notification_hook = {
     }]
 }
 
+permission_hook = {
+    "matcher": "",
+    "hooks": [{
+        "type": "command",
+        "command": f"{hook_path} permission"
+    }]
+}
+
 # Merge into existing hooks (don't overwrite user's existing hooks)
 if "hooks" not in settings:
     settings["hooks"] = {}
@@ -126,6 +134,11 @@ if "Notification" not in hooks:
     hooks["Notification"] = []
 if not has_claude_ping(hooks["Notification"]):
     hooks["Notification"].append(notification_hook)
+
+if "PermissionRequest" not in hooks:
+    hooks["PermissionRequest"] = []
+if not has_claude_ping(hooks["PermissionRequest"]):
+    hooks["PermissionRequest"].append(permission_hook)
 
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)

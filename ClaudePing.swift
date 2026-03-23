@@ -8,16 +8,17 @@ import Cocoa
 
 struct PingMessage {
     let project: String
-    let event: String      // "stop" or "input_needed"
+    let event: String      // "stop", "input_needed", or "permission"
     let terminalApp: String // e.g. "Terminal", "iTerm2", "kitty", "Ghostty", "Warp"
     let terminalPID: Int?
     let timestamp: Date
     
     var displayTitle: String {
-        if event == "input_needed" {
-            return "Needs input"
+        switch event {
+        case "input_needed": return "Needs input"
+        case "permission": return "Needs permission"
+        default: return "Done"
         }
-        return "Done"
     }
     
     var displaySubtitle: String {
@@ -182,7 +183,7 @@ class PingView: NSView {
         
         // Accent bar on the left
         let accentColor: NSColor
-        if message.event == "input_needed" {
+        if message.event == "input_needed" || message.event == "permission" {
             accentColor = NSColor(red: 1.0, green: 0.72, blue: 0.28, alpha: 1.0) // amber
         } else {
             accentColor = NSColor(red: 0.42, green: 0.85, blue: 0.66, alpha: 1.0) // green
@@ -195,7 +196,7 @@ class PingView: NSView {
         
         // Icon (checkmark or prompt indicator)
         let iconStr: String
-        if message.event == "input_needed" {
+        if message.event == "input_needed" || message.event == "permission" {
             iconStr = "❯"
         } else {
             iconStr = "✓"
@@ -275,7 +276,7 @@ class PingManager {
             window.showAnimated()
             
             // Play a subtle sound
-            if message.event == "input_needed" {
+            if message.event == "input_needed" || message.event == "permission" {
                 NSSound(named: "Basso")?.play()
             } else {
                 NSSound(named: "Glass")?.play()

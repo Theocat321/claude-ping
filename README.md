@@ -18,7 +18,7 @@ Click → jumps to terminal window
 ```
 
 - **Green HUD** = task completed
-- **Amber HUD** = Claude needs your input
+- **Amber HUD** = Claude needs your input or permission approval
 - Different sounds for each event
 - Stacks multiple pings if several sessions finish at once
 - Detects your terminal app (Terminal, iTerm2, Kitty, Ghostty, Warp, WezTerm, Alacritty)
@@ -81,6 +81,7 @@ ClaudePing plugs into Claude Code's [hooks system](https://docs.anthropic.com/en
 
 - **Stop hook** — fires when Claude finishes any response
 - **Notification hook** (`idle_prompt`) — fires when Claude is idle and waiting for input
+- **PermissionRequest hook** — fires when Claude needs tool approval from the user
 
 The hook script detects which terminal app is running, finds the project name from git, and sends a message to the ClaudePing app over a Unix socket. If ClaudePing isn't running, it falls back to a standard macOS notification.
 
