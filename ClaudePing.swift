@@ -1,5 +1,5 @@
 // ClaudePing.swift
-// A macOS floating HUD that appears near your mouse when Claude Code finishes a task.
+// A macOS floating HUD that appears in the bottom-right corner of the screen when Claude Code finishes a task.
 // Click it to jump straight to the terminal window.
 
 import Cocoa
@@ -8,9 +8,11 @@ import Cocoa
 
 struct PingMessage {
     let project: String
+    let branch: String     // git branch; shown as the subtitle
     let event: String      // "stop", "input_needed", or "permission"
     let terminalApp: String // e.g. "Terminal", "iTerm2", "kitty", "Ghostty", "Warp"
     let terminalPID: Int?
+    let paradev: ParadevTarget? // set when the session runs inside Paradev
     let timestamp: Date
     
     var displayTitle: String {
@@ -21,8 +23,80 @@ struct PingMessage {
         }
     }
     
+    var needsAttention: Bool {
+        return event == "input_needed" || event == "permission"
+    }
+    
     var displaySubtitle: String {
-        return project.isEmpty ? "Claude Code" : project
+        return branch.isEmpty ? "Claude Code" : branch
+    }
+}
+
+// MARK: - Paradev focus
+
+/// A Claude session running in a Paradev terminal pane.
+struct ParadevTarget {
+    let workspaceID: String
+    let terminalID: String
+    let cliPath: String
+    
+    init?(workspaceID: String, terminalID: String, cliPath: String) {
+        guard !workspaceID.isEmpty else { return nil }
+        self.workspaceID = workspaceID
+        self.terminalID = terminalID
+        self.cliPath = cliPath
+    }
+    
+    var deepLink: URL? { URL(string: "superset://v2-workspace/\(workspaceID)") }
+}
+
+enum ParadevFocuser {
+    /// Brings Paradev forward on the session's workspace, then focuses the pane running its terminal.
+    static func focus(_ target: ParadevTarget) {
+        if let url = target.deepLink { NSWorkspace.shared.open(url) }
+        guard !target.terminalID.isEmpty, !target.cliPath.isEmpty else { return }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let paneID = findPaneID(target) else {
+                NSLog("ClaudePing: no Paradev pane found for terminal %@", target.terminalID)
+                return
+            }
+            _ = runCLI(target.cliPath, ["panes", "focus", "--workspace", target.workspaceID, "--pane", paneID, "--json"])
+        }
+    }
+    
+    private static func findPaneID(_ target: ParadevTarget) -> String? {
+        guard let output = runCLI(target.cliPath, ["panes", "list", "--workspace", target.workspaceID, "--json"]),
+              let layout = (try? JSONSerialization.jsonObject(with: output)) as? [String: Any]
+        else { return nil }
+        
+        let mainTabs = layout["tabs"] as? [[String: Any]] ?? []
+        let sidebarTabs = (layout["sidebar"] as? [String: Any])?["tabs"] as? [[String: Any]] ?? []
+        let panes = (mainTabs + sidebarTabs).flatMap { $0["panes"] as? [[String: Any]] ?? [] }
+        return panes.first { ($0["terminalId"] as? String) == target.terminalID }?["id"] as? String
+    }
+    
+    /// Runs the Paradev CLI and returns stdout, or nil if it fails.
+    private static func runCLI(_ path: String, _ args: [String]) -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            NSLog("ClaudePing: could not run Paradev CLI %@: %@", path, error.localizedDescription)
+            return nil
+        }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            NSLog("ClaudePing: Paradev CLI %@ exited %d", args.joined(separator: " "), process.terminationStatus)
+            return nil
+        }
+        return data
     }
 }
 
@@ -33,12 +107,15 @@ class PingWindow: NSWindow {
     var dismissTimer: Timer?
     var fadeTimer: Timer?
     
-    init(message: PingMessage, at point: NSPoint) {
+    static let width = PingStyle.width
+    static let height = PingStyle.height
+    static let slideDistance: CGFloat = 8
+    static let screenMargin: CGFloat = 12
+
+    init(message: PingMessage) {
         self.message = message
         
-        let width: CGFloat = 260
-        let height: CGFloat = 72
-        let frame = NSRect(x: point.x + 12, y: point.y - height - 12, width: width, height: height)
+        let frame = PingWindow.bottomRightFrame()
         
         super.init(
             contentRect: frame,
@@ -59,8 +136,23 @@ class PingWindow: NSWindow {
         clampToScreen()
     }
     
+    /// Screen the user is looking at: the one under the mouse, else the main screen.
+    static func activeScreen() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+            ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// Bottom-right corner of the active screen, above the Dock. Every ping uses the same spot, newest on top.
+    static func bottomRightFrame() -> NSRect {
+        let visible = activeScreen()?.visibleFrame ?? .zero
+        let x = visible.maxX - width - screenMargin
+        let y = visible.minY + screenMargin
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
+    
     func clampToScreen() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        guard let screen = PingWindow.activeScreen() else { return }
         var f = self.frame
         let visible = screen.visibleFrame
         
@@ -79,13 +171,17 @@ class PingWindow: NSWindow {
     }
     
     func showAnimated() {
+        let target = self.frame
+        self.setFrame(target.offsetBy(dx: PingWindow.slideDistance, dy: 0), display: false)
         self.alphaValue = 0
         self.orderFrontRegardless()
+        self.invalidateShadow()
         
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             self.animator().alphaValue = 1.0
+            self.animator().setFrame(target, display: true)
         })
         
         // Auto-dismiss after 8 seconds
@@ -110,6 +206,12 @@ class PingWindow: NSWindow {
     
     func activateTerminal() {
         dismissTimer?.invalidate()
+        
+        if let target = message.paradev {
+            ParadevFocuser.focus(target)
+            dismissAnimated()
+            return
+        }
         
         // Try to activate the terminal app
         let appName = message.terminalApp.isEmpty ? "Terminal" : message.terminalApp
@@ -137,115 +239,133 @@ class PingWindow: NSWindow {
 
 // MARK: - Custom View
 
-class PingView: NSView {
+/// Layout metrics on a 4pt grid, modelled on macOS notification banners.
+enum PingStyle {
+    static let width: CGFloat = 240
+    static let height: CGFloat = 52
+    static let cornerRadius: CGFloat = 12
+    static let horizontalPadding: CGFloat = 12
+    static let iconSize: CGFloat = 16
+    static let iconTextGap: CGFloat = 8
+    static let lineSpacing: CGFloat = 2
+    static let titleFontSize: CGFloat = 13
+    static let subtitleFontSize: CGFloat = 11
+    static let borderWidth: CGFloat = 0.5
+    static let hoverOverlayAlpha: CGFloat = 0.06
+}
+
+class PingView: NSVisualEffectView {
     let message: PingMessage
     weak var parentWindow: PingWindow?
-    var isHovered = false
-    var trackingArea: NSTrackingArea?
+    private let hoverOverlay = NSView()
     
     init(message: PingMessage, window: PingWindow) {
         self.message = message
         self.parentWindow = window
         super.init(frame: .zero)
         
-        // Set up cursor tracking
-        let area = NSTrackingArea(
+        material = .popover
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = PingStyle.cornerRadius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = PingStyle.borderWidth
+        
+        setupHoverOverlay()
+        setupContent()
+        updateColors()
+        
+        addTrackingArea(NSTrackingArea(
             rect: .zero,
             options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
-        )
-        self.addTrackingArea(area)
-        self.trackingArea = area
+        ))
     }
     
     required init?(coder: NSCoder) { fatalError() }
     
-    override func draw(_ dirtyRect: NSRect) {
-        let rect = bounds.insetBy(dx: 2, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 14, yRadius: 14)
+    private func setupHoverOverlay() {
+        hoverOverlay.wantsLayer = true
+        hoverOverlay.isHidden = true
+        hoverOverlay.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hoverOverlay)
+        NSLayoutConstraint.activate([
+            hoverOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            hoverOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            hoverOverlay.topAnchor.constraint(equalTo: topAnchor),
+            hoverOverlay.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+    
+    private func setupContent() {
+        let icon = NSImageView()
+        let symbolName = message.needsAttention ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
+        let config = NSImage.SymbolConfiguration(pointSize: PingStyle.iconSize, weight: .regular)
+        icon.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: message.displayTitle)?
+            .withSymbolConfiguration(config)
+        icon.contentTintColor = message.needsAttention ? .systemOrange : .systemGreen
         
-        // Background
-        let bgColor: NSColor
-        if isHovered {
-            bgColor = NSColor(calibratedWhite: 0.15, alpha: 0.95)
-        } else {
-            bgColor = NSColor(calibratedWhite: 0.12, alpha: 0.92)
-        }
-        bgColor.setFill()
-        path.fill()
+        let title = makeLabel(message.displayTitle, size: PingStyle.titleFontSize, weight: .semibold, color: .labelColor)
+        let subtitle = makeLabel(message.displaySubtitle, size: PingStyle.subtitleFontSize, weight: .regular, color: .secondaryLabelColor)
         
-        // Subtle border
-        let borderColor = NSColor(calibratedWhite: 1.0, alpha: isHovered ? 0.15 : 0.08)
-        borderColor.setStroke()
-        path.lineWidth = 1
-        path.stroke()
+        let text = NSStackView(views: [title, subtitle])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = PingStyle.lineSpacing
         
-        // Accent bar on the left
-        let accentColor: NSColor
-        if message.event == "input_needed" || message.event == "permission" {
-            accentColor = NSColor(red: 1.0, green: 0.72, blue: 0.28, alpha: 1.0) // amber
-        } else {
-            accentColor = NSColor(red: 0.42, green: 0.85, blue: 0.66, alpha: 1.0) // green
-        }
+        let row = NSStackView(views: [icon, text])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = PingStyle.iconTextGap
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
         
-        let barRect = NSRect(x: 12, y: 16, width: 3, height: rect.height - 28)
-        let barPath = NSBezierPath(roundedRect: barRect, xRadius: 1.5, yRadius: 1.5)
-        accentColor.setFill()
-        barPath.fill()
-        
-        // Icon (checkmark or prompt indicator)
-        let iconStr: String
-        if message.event == "input_needed" || message.event == "permission" {
-            iconStr = "❯"
-        } else {
-            iconStr = "✓"
-        }
-        let iconAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 16, weight: .bold),
-            .foregroundColor: accentColor
-        ]
-        let iconSize = iconStr.size(withAttributes: iconAttrs)
-        iconStr.draw(at: NSPoint(x: 24, y: rect.height / 2 - iconSize.height / 2 + 4), withAttributes: iconAttrs)
-        
-        // Title
-        let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
-            .foregroundColor: NSColor.white
-        ]
-        message.displayTitle.draw(at: NSPoint(x: 48, y: rect.height / 2 + 4), withAttributes: titleAttrs)
-        
-        // Subtitle (project name)
-        let subAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.55)
-        ]
-        message.displaySubtitle.draw(at: NSPoint(x: 48, y: rect.height / 2 - 14), withAttributes: subAttrs)
-        
-        // "Click to open" hint on the right
-        if isHovered {
-            let hintAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 10, weight: .medium),
-                .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.4)
-            ]
-            let hint = "click to open →"
-            let hintSize = hint.size(withAttributes: hintAttrs)
-            hint.draw(at: NSPoint(x: rect.width - hintSize.width - 12, y: rect.height / 2 - hintSize.height / 2 + 2), withAttributes: hintAttrs)
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: PingStyle.iconSize),
+            icon.heightAnchor.constraint(equalToConstant: PingStyle.iconSize),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: PingStyle.horizontalPadding),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -PingStyle.horizontalPadding),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+    
+    private func makeLabel(_ string: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+        let label = NSTextField(labelWithString: string)
+        label.font = .systemFont(ofSize: size, weight: weight)
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+    
+    /// CGColors don't follow appearance changes, so resolve them per appearance.
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.separatorColor.cgColor
+            hoverOverlay.layer?.backgroundColor = NSColor.labelColor
+                .withAlphaComponent(PingStyle.hoverOverlayAlpha).cgColor
         }
     }
     
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+    
     override func mouseEntered(with event: NSEvent) {
-        isHovered = true
+        hoverOverlay.isHidden = false
         NSCursor.pointingHand.push()
-        needsDisplay = true
         // Pause auto-dismiss while hovering
         parentWindow?.dismissTimer?.invalidate()
     }
     
     override func mouseExited(with event: NSEvent) {
-        isHovered = false
+        hoverOverlay.isHidden = true
         NSCursor.pop()
-        needsDisplay = true
         // Restart auto-dismiss
         parentWindow?.dismissTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
             self?.parentWindow?.dismissAnimated()
@@ -265,18 +385,13 @@ class PingManager {
     
     func showPing(_ message: PingMessage) {
         DispatchQueue.main.async {
-            let mouseLocation = NSEvent.mouseLocation
-            
-            // Stack multiple pings vertically
-            let offset = CGFloat(self.windows.count) * 80
-            let point = NSPoint(x: mouseLocation.x, y: mouseLocation.y - offset)
-            
-            let window = PingWindow(message: message, at: point)
+            // Pings share the bottom-right spot; the newest is ordered in front
+            let window = PingWindow(message: message)
             self.windows.append(window)
             window.showAnimated()
             
             // Play a subtle sound
-            if message.event == "input_needed" || message.event == "permission" {
+            if message.needsAttention {
                 NSSound(named: "Basso")?.play()
             } else {
                 NSSound(named: "Glass")?.play()
@@ -359,9 +474,13 @@ class PingServer {
         
         // Parse simple key=value format, one per line
         var project = ""
+        var branch = ""
         var event = "stop"
         var terminalApp = ""
         var terminalPID: Int? = nil
+        var paradevWorkspace = ""
+        var paradevTerminal = ""
+        var paradevCLI = ""
         
         for line in str.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1)
@@ -371,18 +490,24 @@ class PingServer {
             
             switch key {
             case "project": project = val
+            case "branch": branch = val
             case "event": event = val
             case "terminal": terminalApp = val
             case "pid": terminalPID = Int(val)
+            case "paradev_workspace": paradevWorkspace = val
+            case "paradev_terminal": paradevTerminal = val
+            case "paradev_cli": paradevCLI = val
             default: break
             }
         }
         
         let message = PingMessage(
             project: project,
+            branch: branch,
             event: event,
             terminalApp: terminalApp,
             terminalPID: terminalPID,
+            paradev: ParadevTarget(workspaceID: paradevWorkspace, terminalID: paradevTerminal, cliPath: paradevCLI),
             timestamp: Date()
         )
         
@@ -436,9 +561,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func sendTestPing() {
         let msg = PingMessage(
             project: "my-cool-project",
+            branch: "main",
             event: "stop",
             terminalApp: "Terminal",
             terminalPID: nil,
+            paradev: nil,
             timestamp: Date()
         )
         PingManager.shared.showPing(msg)

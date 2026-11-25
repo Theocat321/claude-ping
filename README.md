@@ -1,6 +1,6 @@
 # ⚡ ClaudePing
 
-A floating HUD for macOS that appears **next to your mouse cursor** when Claude Code finishes a task or needs input. Click it to jump straight back to the terminal.
+A floating HUD for macOS that appears in the **bottom-right corner of your screen** when Claude Code finishes a task or needs input. Click it to jump straight back to the terminal.
 
 ## How it works
 
@@ -11,16 +11,20 @@ Hook script fires
         ↓
 Sends message to ClaudePing via Unix socket
         ↓
-Floating HUD appears near your cursor
+Floating HUD appears bottom-right of the screen
         ↓
 Click → jumps to terminal window
         (or wait 8s → auto-dismisses)
 ```
 
-- **Green HUD** = task completed
-- **Amber HUD** = Claude needs your input or permission approval
+- **Green check** = task completed
+- **Orange alert** = Claude needs your input or permission approval
+- Native macOS look: system blur material, follows light and dark mode
 - Different sounds for each event
-- Stacks multiple pings if several sessions finish at once
+- If several sessions finish at once, pings pile up in the same spot with the newest on top
+- On multi-monitor setups, shows on the screen your mouse is on
+- Shows the session's git branch so you can tell pings apart
+- Sessions running in [Paradev](https://superset.sh): clicking focuses that session's workspace and pane (via the `superset://` deep link and `paradev panes focus`)
 - Detects your terminal app (Terminal, iTerm2, Kitty, Ghostty, Warp, WezTerm, Alacritty)
 - Runs as a menu bar app (⚡ icon) — no dock clutter
 
